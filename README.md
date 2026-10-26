@@ -2,7 +2,7 @@
 
 A desktop viewer for road BIM models, CAD drawings and point clouds, with measuring tools built for road work: lane width between markings, clearance height, slope and real-world coordinates.
 
-![Motorway interchange with measurements](docs/screenshot.png)
+![Motorway interchange with measurements](docs/interchange.png)
 
 *A motorway interchange (IFC, 15 layers) with three measurements: clearance under the overpass (6.24 m), width between road markings (7.44 m) and a distance with horizontal length, height difference and slope (8.17 m).*
 
