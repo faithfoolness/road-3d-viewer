@@ -2,9 +2,9 @@
 
 A desktop viewer for road BIM models, CAD drawings and point clouds, with measuring tools built for road work: lane width between markings, clearance height, slope and real-world coordinates.
 
-![Lane width measured between two road markings](docs/screenshot.png)
+![Motorway interchange with measurements](docs/screenshot.png)
 
-*Synthetic demo scene from `examples/`: an IFC road model on top of a LAZ point cloud, with the lane width measured from the centre line to the edge line.*
+*A motorway interchange (IFC, 15 layers) with three measurements: clearance under the overpass (6.24 m), width between road markings (7.44 m) and a distance with horizontal length, height difference and slope (8.17 m).*
 
 ## Why
 
