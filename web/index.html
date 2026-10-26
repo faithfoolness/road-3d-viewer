@@ -1,0 +1,1769 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>3D Viewer</title>
+  <style>
+    :root {
+    /* Dark theme (the interface always stays dark) */
+    --bg: #140f0a;
+    --scene-bg: #04050a; /* dark scene background */
+    --panel: #1f1811;
+    --panel2: #2a211a;
+    --border: rgba(255, 255, 255, 0.09);
+    --text: #f5f1ec;
+    --dim: #a99a8c;
+    --soft: rgba(255, 255, 255, 0.05);
+    --accent: #ff7a1f;
+    --toggle-bg: #2a211a;
+    --toggle-shadow: rgba(255, 255, 255, 0.1);
+  }
+
+  /* Light theme changes only the scene background */
+  .light-scene {
+    --scene-bg: #FFE4C4; /* light scene background */
+  }
+
+  *, *::before, *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: transparent;
+    color: var(--text);
+    font-family: Manrope, system-ui, sans-serif;
+    font-size: 14px;
+    display: flex;
+    flex-direction: column;
+  }
+
+  #app-window {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    background: var(--bg);
+    /* Windows 11 (DWM) rounds the corners itself; a CSS radius only got in the way:
+       the page background of a different shade showed through the corners */
+    overflow: hidden;
+    position: relative;
+    transition: background 0.3s ease;
+  }
+
+  /* --- Startup and loading overlay ---
+     One element, two roles. At startup it is almost opaque and hides the
+     half-built scene; while a file loads it becomes translucent and
+     blurred, so the model stays visible behind it. It is visible in the
+     markup by default, so it is on screen before any JS runs. */
+  #overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 3000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(20, 15, 10, 0.97);
+    backdrop-filter: blur(2px);
+    transition: opacity 0.35s ease, background 0.35s ease, backdrop-filter 0.35s ease;
+  }
+
+  /* "loading a file" mode: the scene shows through the blur */
+  #overlay.busy {
+    background: rgba(20, 15, 10, 0.55);
+    backdrop-filter: blur(10px) saturate(0.8);
+  }
+
+  #overlay.gone {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .overlay-inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    user-select: none;
+    padding: 0 32px;
+    text-align: center;
+  }
+
+  /* App icon inside the spinning loading ring */
+  .overlay-mark {
+    position: relative;
+    width: 76px;
+    height: 76px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .overlay-logo {
+    width: 48px;
+    height: 48px;
+    user-select: none;
+    animation: overlay-breathe 1.8s ease-in-out infinite;
+  }
+
+  .overlay-spinner {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    border: 2.5px solid rgba(255, 122, 31, 0.18);
+    border-top-color: var(--accent);
+    animation: overlay-spin 0.85s linear infinite;
+  }
+
+  @keyframes overlay-breathe {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.75; transform: scale(0.94); }
+  }
+
+  @keyframes overlay-spin {
+    to { transform: rotate(360deg); }
+  }
+
+  #overlay-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    letter-spacing: 0.01em;
+    max-width: 380px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  #overlay-sub {
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--dim);
+    min-height: 13px;
+    white-space: pre-line;          /* "file N of M" and progress on separate lines */
+    font-variant-numeric: tabular-nums;   /* digits do not jump while updating */
+  }
+
+  #overlay-cancel {
+    margin-top: 4px;
+    padding: 6px 16px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--dim);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  #overlay-cancel:hover {
+    color: var(--text);
+    border-color: var(--dim);
+    background: var(--soft);
+  }
+
+  #overlay-cancel.hidden { display: none; }
+
+  /* Error toast */
+  #error-toast {
+    position: absolute;
+    left: 50%;
+    bottom: 56px;
+    transform: translateX(-50%) translateY(8px);
+    z-index: 2500;
+    max-width: 460px;
+    padding: 10px 14px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: #ffd9d9;
+    background: rgba(120, 30, 30, 0.92);
+    border: 1px solid rgba(255, 107, 107, 0.45);
+    border-radius: 10px;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+    white-space: pre-wrap;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.25s ease, transform 0.25s ease;
+  }
+
+  #error-toast.shown {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+    pointer-events: auto;
+  }
+
+  /* --- Window resize zones ---
+     Qt leaves only 2 px around the QWebEngineView, which are almost impossible
+     to hit with the mouse. These strips inside the page catch the press
+     and hand it to the system (startSystemResize); Windows does the resizing. */
+  .resize-grip {
+    position: fixed;
+    z-index: 2000;
+  }
+
+  #app-window.maximized .resize-grip {
+    display: none;   /* a maximized window is not resized, as everywhere in Windows */
+  }
+
+  .grip-t { top: 0; left: 8px; right: 8px; height: 6px; cursor: ns-resize; }
+  .grip-b { bottom: 0; left: 8px; right: 8px; height: 6px; cursor: ns-resize; }
+  .grip-l { left: 0; top: 8px; bottom: 8px; width: 6px; cursor: ew-resize; }
+  .grip-r { right: 0; top: 8px; bottom: 8px; width: 6px; cursor: ew-resize; }
+
+  .grip-tl { top: 0; left: 0; width: 12px; height: 12px; cursor: nwse-resize; }
+  .grip-tr { top: 0; right: 0; width: 12px; height: 12px; cursor: nesw-resize; }
+  .grip-bl { bottom: 0; left: 0; width: 12px; height: 12px; cursor: nesw-resize; }
+  .grip-br { bottom: 0; right: 0; width: 12px; height: 12px; cursor: nwse-resize; }
+
+    /* --- Theme Toggle Switch --- */
+    #theme-switch-wrapper {
+      position: absolute;
+      right: 50px;
+      bottom: 12px;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+    }
+
+    .theme-toggle {
+      position: relative;
+      width: 46px;
+      height: 24px;
+      background: var(--toggle-bg);
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      cursor: pointer;
+      transition: background 0.3s, border-color 0.3s;
+      box-shadow: 0 2px 6px var(--toggle-shadow);
+      flex-shrink: 0;
+    }
+
+    .theme-toggle .knob {
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 18px;
+      height: 18px;
+      background: #ffffff;
+      border-radius: 50%;
+      transition: transform 0.3s cubic-bezier(0.4, 0.0, 0.2, 1), background 0.3s;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      line-height: 0;
+      color: #2a211a;
+    }
+
+    .theme-toggle.light .knob {
+      transform: translateX(22px);
+      background: #f0ece6;
+    }
+
+    .theme-toggle .icon-sun, .theme-toggle .icon-moon {
+      position: absolute;
+      top: 50%;
+      transform: translateY(-50%);
+      font-size: 10px;
+      pointer-events: none;
+      transition: opacity 0.3s;
+    }
+    /* The free side of the track shows the mode a click will switch to
+       (the knob moves there): the sun on the right in the dark theme, the moon
+       on the left in the light one. The low-power switch works the same way. */
+    .theme-toggle .icon-moon { left: 5px; opacity: 0; }
+    .theme-toggle .icon-sun { right: 5px; opacity: 1; }
+    .theme-toggle.light .icon-moon { opacity: 1; }
+    .theme-toggle.light .icon-sun { opacity: 0; }
+
+    /* Low-power switch, styled like the theme switch: the free side shows
+       the mode a click switches to (off: a feather, on: a bolt); when on,
+       the track is highlighted with the accent colour */
+    .theme-toggle .icon-on, .theme-toggle .icon-off {
+      position: absolute;
+      top: 50%;
+      transform: translateY(-50%);
+      display: flex;
+      pointer-events: none;
+      transition: opacity 0.3s;
+      color: var(--dim);
+    }
+    .theme-toggle .icon-on { left: 6px; opacity: 0; color: #fff; }
+    .theme-toggle .icon-off { right: 6px; opacity: 1; }
+    #perf-toggle-btn.on,
+    #theme-toggle-btn.light { background: rgba(255, 122, 31, 0.55); border-color: var(--accent); }
+    #theme-toggle-btn.light .icon-moon { color: #fff; }
+    #perf-toggle-btn.on .knob { transform: translateX(22px); }
+    #perf-toggle-btn.on .icon-on { opacity: 1; }
+    #perf-toggle-btn.on .icon-off { opacity: 0; }
+
+    /* Resize handles along the edges */
+    .resize-handle {
+      position: absolute;
+      z-index: 999;
+    }
+    .resize-handle.n  { top: 0;    left: 8px;  right: 8px;  height: 6px; cursor: n-resize; }
+    .resize-handle.s  { bottom: 0; left: 8px;  right: 8px;  height: 6px; cursor: s-resize; }
+    .resize-handle.w  { left: 0;   top: 8px;   bottom: 8px; width: 6px;  cursor: w-resize; }
+    .resize-handle.e  { right: 0;  top: 8px;   bottom: 8px; width: 6px;  cursor: e-resize; }
+    .resize-handle.nw { top: 0;    left: 0;    width: 14px; height: 14px; cursor: nw-resize; border-radius: 12px 0 0 0; }
+    .resize-handle.ne { top: 0;    right: 0;   width: 14px; height: 14px; cursor: ne-resize; border-radius: 0 12px 0 0; }
+    .resize-handle.sw { bottom: 0; left: 0;    width: 14px; height: 14px; cursor: sw-resize; border-radius: 0 0 0 12px; }
+    .resize-handle.se { bottom: 0; right: 0;   width: 14px; height: 14px; cursor: se-resize; border-radius: 0 0 12px 0; }
+
+    button {
+      font-family: inherit;
+      cursor: pointer;
+    }
+
+    #topbar {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      height: 54px;
+      padding: 0 18px;
+      flex: none;
+      z-index: 30;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      -webkit-app-region: no-drag;
+      overflow: hidden;   /* when space runs out, the rest slides under the window buttons */
+    }
+
+    /* When button labels expand and the top bar runs out of space, the
+       logo gives way first: it shrinks and hides its text (the icon stays).
+       The window buttons stay in place. */
+    #logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding-right: 4px;
+      flex: 0 1 auto;
+      min-width: 24px;
+      overflow: hidden;
+    }
+    #logo-name, #logo-badge { flex-shrink: 0; }
+
+    #logo-img {
+      width: 24px;
+      height: 24px;
+      flex-shrink: 0;
+      user-select: none;
+      pointer-events: none;   /* the window can be dragged by the icon too */
+    }
+
+    #logo-name {
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      font-size: 16px;
+    }
+
+    #logo-badge {
+      font-size: 11px;
+      color: var(--dim);
+      font-weight: 700;
+      padding: 2px 8px;
+      border: 1px solid var(--border);
+      border-radius: 20px;
+    }
+
+    .btn-primary {
+      border-radius: 9px;
+      border: 1px solid var(--border);
+      background: var(--soft);
+      color: var(--text);
+      font-weight: 600;
+      font-size: 13px;
+      overflow: hidden;
+      width: 34px;
+      min-width: 34px;   /* width becomes auto on hover; without this the button shrank for a moment and a quick click missed */
+      height: 34px;
+      padding: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: width 0.25s ease, padding 0.25s ease, background 0.2s, filter 0.2s;
+    }
+    .btn-primary:hover,
+    .btn-primary.open {
+      padding: 0 15px;
+      width: auto;
+      background: rgba(255,255,255,0.09);
+    }
+
+    /* Measuring tools: one shared pill; the buttons inside have
+       no borders of their own, the active one is highlighted as a whole */
+    .tool-group {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      padding: 2px;
+      border-radius: 11px;
+      border: 1px solid var(--border);
+      background: var(--soft);
+      flex-shrink: 0;
+      position: relative;
+    }
+
+    .tool-group .btn-primary {
+      height: 30px;
+      width: 32px;
+      min-width: 32px;
+      border-color: transparent;
+      background: transparent;
+      border-radius: 8px;
+    }
+
+    /* the label slides out on hover, like on the other top-bar buttons */
+    .tool-group .btn-primary:hover,
+    .tool-group .btn-primary.open {
+      width: auto;
+      padding: 0 12px;
+      background: rgba(255,255,255,0.09);
+    }
+
+    /* a label left open after the mouse moved away is not highlighted:
+       only the button under the cursor is */
+    .btn-primary.open:not(:hover) { background: var(--soft); }
+    .tool-group .btn-primary.open:not(:hover) { background: transparent; }
+
+    .tool-sep {
+      width: 1px;
+      height: 18px;
+      margin: 0 3px;
+      background: var(--border);
+      flex-shrink: 0;
+    }
+
+    .btn-primary svg {
+      flex-shrink: 0;
+      display: block;
+      pointer-events: none;
+    }
+
+    .btn-primary .btn-label {
+      max-width: 0;
+      overflow: hidden;
+      white-space: nowrap;
+      transition: max-width 0.25s ease, margin-left 0.25s ease;
+      margin-left: 0;
+      pointer-events: none;
+    }
+
+    .btn-primary:hover .btn-label,
+    .btn-primary.open .btn-label {
+      max-width: 160px;
+      margin-left: 7px;
+    }
+
+    #topbar-right {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    #file-name {
+      font-size: 12px;
+      color: var(--dim);
+      font-family: Manrope, system-ui, sans-serif;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 240px;
+      flex: 0 1 auto;
+      min-width: 0;
+    }
+
+    #win-controls {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      margin-left: auto;
+      flex-shrink: 0;
+      /* if even shrinking the logo is not enough, the window buttons stay at the
+         right edge on top of everything else */
+      position: sticky;
+      right: 0;
+      z-index: 2;
+      background: var(--panel);
+      padding-left: 8px;
+      /* the background covers the right padding too, so nothing peeks out from under the buttons */
+      box-shadow: 18px 0 0 var(--panel);
+    }
+    /* soft left edge when the window buttons overlap the tools */
+    #win-controls::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: -24px;
+      width: 24px;
+      background: linear-gradient(to right, transparent, var(--panel));
+      pointer-events: none;
+    }
+
+    #hint-btn {
+      position: absolute;
+      right: 14px;
+      bottom: 12px;
+      width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      border: 1px solid var(--border);
+      background: rgba(0,0,0,0.5);
+      backdrop-filter: blur(8px);
+      color: var(--dim);
+      font-size: 13px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: default;
+      z-index: 10;
+      user-select: none;
+      font-family: Manrope, system-ui, sans-serif;
+    }
+
+    #hint-btn:hover {
+      background: rgba(0,0,0,0.7);
+      color: var(--text);
+    }
+
+    #hint-tooltip {
+      display: none;
+      position: absolute;
+      bottom: calc(100% + 8px);
+      right: 0;
+      background: rgba(0,0,0,0.82);
+      backdrop-filter: blur(10px);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 18px 8px;
+      width: 560px;
+      max-width: calc(100vw - 60px);
+      /* two columns, so the help fits in the window height */
+      display: none;
+      grid-template-columns: 1fr 1fr;
+      column-gap: 22px;
+      font-size: 12px;
+      line-height: 1.45;
+      color: var(--dim);
+      white-space: normal;
+      text-align: left;
+      cursor: default;
+      pointer-events: none;
+      z-index: 100;
+      font-family: Manrope, system-ui, sans-serif;
+      font-weight: 500;
+    }
+
+    #hint-tooltip .hint-title {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin: 0 0 4px;
+    }
+
+    #hint-tooltip ul {
+      list-style: none;
+      margin: 0 0 10px;
+      padding: 0;
+      break-inside: avoid;
+    }
+
+    #hint-tooltip .hint-title { break-after: avoid; }
+
+    /* above the Lighting panel, which comes later in the markup */
+    #hint-btn:hover { z-index: 60; }
+
+    #hint-tooltip ul:last-child { margin-bottom: 2px; }
+
+    #hint-tooltip li {
+      padding: 2px 0 2px 12px;
+      position: relative;
+    }
+
+    #hint-tooltip li::before {
+      content: '';
+      position: absolute;
+      left: 2px;
+      top: 9px;
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: var(--border);
+    }
+
+    #hint-tooltip .hint-ico {
+      display: inline-block;
+      vertical-align: -1px;
+    }
+
+    #hint-tooltip b {
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    #hint-btn:hover #hint-tooltip {
+      display: grid;
+    }
+
+    #win-controls button {
+      width: 36px;
+      height: 36px;
+      border: none;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--dim);
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #win-controls button:hover {
+      background: rgba(255, 255, 255, 0.1);
+      color: var(--text);
+    }
+
+    /* the maximize/restore icon follows the window state:
+       main.bundle.js sets the .maximized class on a signal from Python */
+    #btn-win-maximize .icon-restore { display: none; }
+    #app-window.maximized #btn-win-maximize .icon-maximize { display: none; }
+    #app-window.maximized #btn-win-maximize .icon-restore { display: block; }
+
+    #btn-win-close:hover {
+      background: #e81123 !important;
+      color: #fff !important;
+    }
+
+    #main-area {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    position: relative;
+    background: var(--scene-bg);
+    transition: background 0.3s ease;
+  }
+
+    #viewer-wrap {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+    background: var(--scene-bg);
+  }
+
+    #viewer-mount {
+      position: absolute;
+      inset: 0;
+      cursor: grab;
+    }
+
+    #viewer-mount:active {
+      cursor: grabbing;
+    }
+
+    #viewer-badge {
+      position: absolute;
+      top: 14px;
+      left: 14px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      pointer-events: none;
+    }
+
+    .badge {
+      background: rgba(0, 0, 0, 0.5);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      padding: 6px 11px;
+      border-radius: 8px;
+      color: #fff;
+    }
+
+    #status:empty { display: none; }
+
+    #status {
+      position: absolute;
+      left: 12px;
+      bottom: 12px;
+      font: 13px/1.4 sans-serif;
+      color: var(--dim);
+      background: rgba(0, 0, 0, 0.6);
+      backdrop-filter: blur(8px);
+      padding: 6px 12px;
+      border-radius: 8px;
+      pointer-events: none;
+      max-width: 60%;
+      border: 1px solid var(--border);
+    }
+
+    /* Layers panel (loaded models) */
+    #model-panel {
+      position: absolute;
+      left: 14px;
+      top: 14px;
+      width: 230px;
+      min-width: 190px;
+      max-width: calc(100% - 28px);
+      display: flex;
+      flex-direction: column;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 12px 12px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+      pointer-events: auto;
+      z-index: 10;
+    }
+
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+      user-select: none;
+    }
+
+    /* "X of Y shown" next to the title */
+    #layers-count {
+      margin-right: auto;
+      font-size: 10px;
+      color: var(--dim);
+      opacity: 0.75;
+      white-space: nowrap;
+    }
+    /* some layers are hidden: highlight it so they are not forgotten */
+    #layers-count.partial {
+      color: var(--accent);
+      opacity: 1;
+    }
+
+    #layers-collapse {
+      width: 22px;
+      height: 22px;
+      margin: -3px -6px -3px 0;
+      padding: 0;
+      border: none;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--dim);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    #layers-collapse:hover {
+      background: var(--soft);
+      color: var(--text);
+    }
+
+    #layers-collapse svg {
+      transition: transform 0.2s ease;
+    }
+
+    /* collapsed panel: title only, the triangle points down */
+    #model-panel.collapsed {
+      height: auto !important;
+      padding-bottom: 10px;
+    }
+    #model-panel.collapsed .panel-head { margin-bottom: 0; }
+    #model-panel.collapsed #model-list,
+    #model-panel.collapsed #layers-resize { display: none; }
+    #model-panel.collapsed #layers-collapse svg { transform: rotate(180deg); }
+
+    /* Corner handle for resizing the panel */
+    #layers-resize {
+      position: absolute;
+      right: 2px;
+      bottom: 2px;
+      width: 14px;
+      height: 14px;
+      cursor: nwse-resize;
+      color: var(--dim);
+      opacity: 0.45;
+      transition: opacity 0.15s;
+      touch-action: none;
+    }
+
+    #model-panel:hover #layers-resize,
+    #layers-resize.dragging { opacity: 1; }
+
+    #model-panel.hidden {
+      display: none;
+    }
+
+    #model-panel .title {
+      font-size: 9px;
+      font-weight: 700;
+      color: var(--dim);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      user-select: none;
+      margin-bottom: 8px;
+    }
+
+    #model-list {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      flex: 1 1 auto;
+      min-height: 0;
+      max-height: 240px;
+      overflow-y: auto;
+    }
+
+    /* the user has set the panel height: the list takes all the space */
+    #model-panel.sized #model-list { max-height: none; }
+
+    #model-list::-webkit-scrollbar { width: 6px; }
+    #model-list::-webkit-scrollbar-thumb {
+      background: var(--panel2);
+      border-radius: 3px;
+    }
+
+    .model-row {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      border-radius: 6px;
+      padding: 2px 2px 2px 4px;
+      transition: background 0.15s;
+    }
+
+    .model-row:hover { background: var(--soft); }
+
+    .model-toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1;
+      min-width: 0;
+      cursor: pointer;
+      user-select: none;
+      padding: 4px 0;
+    }
+
+    .model-toggle input[type="checkbox"] {
+      appearance: none;
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      flex-shrink: 0;
+      margin: 0;
+      border: 1.5px solid var(--dim);
+      border-radius: 4px;
+      background: transparent;
+      cursor: pointer;
+      position: relative;
+      transition: all 0.15s;
+    }
+
+    .model-toggle input[type="checkbox"]:checked {
+      background: var(--accent);
+      border-color: var(--accent);
+    }
+
+    .model-toggle input[type="checkbox"]:checked::after {
+      content: '';
+      position: absolute;
+      left: 3.5px;
+      top: 0.5px;
+      width: 4px;
+      height: 8px;
+      border: solid #fff;
+      border-width: 0 2px 2px 0;
+      transform: rotate(45deg);
+    }
+
+    .model-name {
+      font-size: 12px;
+      color: var(--text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .model-toggle input[type="checkbox"]:not(:checked) ~ .model-name {
+      color: var(--dim);
+    }
+
+    .model-kind {
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      color: var(--dim);
+      background: var(--soft);
+      border-radius: 4px;
+      padding: 2px 5px;
+      flex-shrink: 0;
+    }
+
+    .model-remove {
+      width: 20px;
+      height: 20px;
+      flex-shrink: 0;
+      border: none;
+      background: transparent;
+      color: var(--dim);
+      font-size: 15px;
+      line-height: 1;
+      border-radius: 4px;
+      cursor: pointer;
+      opacity: 0;
+      transition: all 0.15s;
+    }
+
+    .model-row:hover .model-remove { opacity: 1; }
+
+    /* DXF: button that expands the drawing's layer list, and the list itself */
+    .model-expand {
+      width: 16px;
+      height: 20px;
+      flex-shrink: 0;
+      border: none;
+      background: transparent;
+      color: var(--dim);
+      font-size: 11px;
+      line-height: 1;
+      padding: 0;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    .model-expand:hover { color: var(--text); background: var(--soft); }
+
+    .layer-list {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+      margin: 0 0 4px 26px;
+      padding-left: 8px;
+      border-left: 1px solid var(--border);
+    }
+
+    .layer-row {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 2px 4px;
+      border-radius: 5px;
+      cursor: pointer;
+      user-select: none;
+      min-width: 0;
+    }
+
+    .layer-row:hover { background: var(--soft); }
+
+    .layer-row input[type="checkbox"] {
+      appearance: none;
+      -webkit-appearance: none;
+      width: 11px;
+      height: 11px;
+      flex-shrink: 0;
+      margin: 0;
+      border: 1.5px solid var(--dim);
+      border-radius: 3px;
+      cursor: pointer;
+    }
+
+    .layer-row input[type="checkbox"]:checked {
+      background: var(--accent);
+      border-color: var(--accent);
+    }
+
+    .layer-name {
+      font-size: 11px;
+      color: var(--text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .layer-row input:not(:checked) ~ .layer-name { color: var(--dim); }
+
+    .model-remove:hover {
+      background: rgba(255, 70, 70, 0.18);
+      color: #ff6b6b;
+    }
+
+    /* Lighting panel */
+    #light-controls {
+      position: absolute;
+      right: 14px;
+      top: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px 18px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+      pointer-events: auto;
+      z-index: 10;
+    }
+
+    #light-controls .title {
+      font-size: 9px;
+      font-weight: 700;
+      color: var(--dim);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      user-select: none;
+      text-align: center;
+      width: 100%;
+    }
+
+    #light-content {
+      display: flex;
+      gap: 16px;
+      align-items: center;
+    }
+
+    #light-buttons {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    #light-buttons button {
+      width: 38px;
+      height: 38px;
+      border: 2px solid var(--border);
+      border-radius: 50%;
+      background: var(--soft);
+      cursor: pointer;
+      font-size: 18px;
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      color: var(--dim);
+      flex-shrink: 0;
+    }
+
+    #light-buttons button:hover {
+      background: rgba(255, 255, 255, 0.08);
+      transform: scale(1.05);
+    }
+
+    #light-buttons button.active {
+      border-color: var(--accent);
+      background: rgba(255, 122, 31, 0.15);
+      box-shadow: 0 0 20px rgba(255, 122, 31, 0.15);
+      color: var(--text);
+    }
+
+    /* Slider */
+    #slider-wrap {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      height: 84px;
+      padding: 10px;
+    }
+
+    #slider-wrap input[type="range"] {
+      -webkit-appearance: none;
+      appearance: none;
+      writing-mode: vertical-lr;
+      direction: rtl;
+      width: 6px;
+      height: 84px;
+      background: transparent;
+      outline: none;
+      cursor: pointer;
+      position: relative;
+      z-index: 2;
+      margin: 2px;
+      padding: 0;
+    }
+
+    #slider-wrap input[type="range"]::-webkit-slider-runnable-track {
+      width: 6px;
+      height: 84px;
+      background: linear-gradient(to top, var(--accent) var(--fill, 50%), rgba(255, 255, 255, 0.1) var(--fill, 50%));
+      border-radius: 10px;
+      border: 1,5px solid rgba(255, 255, 255, 0.06);
+      box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.3);
+      box-sizing: border-box;
+    }
+
+    #slider-wrap input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #ffffff;
+      cursor: pointer;
+      border: 0px solid rgba(255, 255, 255, 0.4);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4), 0 0 20px rgba(255, 122, 31, 0.15);
+      transition: all 0.2s;
+      position: relative;
+      z-index: 3;
+      margin-left: -2px;
+    }
+
+    #slider-wrap input[type="range"]::-webkit-slider-thumb:hover {
+      transform: scale(1.1);
+      box-shadow: 0 2px 12px rgba(0, 0, 0, 0.5), 0 0 30px rgba(255, 122, 31, 0.25);
+    }
+
+    /* Firefox */
+    #slider-wrap input[type="range"]::-moz-range-track {
+      width: 6px;
+      height: 84px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.3);
+    }
+
+    #slider-wrap input[type="range"]::-moz-range-thumb {
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: #ffffff;
+      cursor: pointer;
+      border: 2px solid rgba(255, 255, 255, 0.4);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4), 0 0 20px rgba(255, 122, 31, 0.15);
+    }
+
+    #slider-wrap input[type="range"]::-moz-range-thumb:hover {
+      transform: scale(1.1);
+      box-shadow: 0 2px 12px rgba(0, 0, 0, 0.5), 0 0 30px rgba(255, 122, 31, 0.25);
+    }
+
+    #slider-wrap input[type="range"]::-moz-range-fill {
+      background: var(--accent);
+      border-radius: 10px;
+    }
+
+    #slider-wrap input[type="range"]::-moz-focus-outer {
+      border: 0;
+    }
+
+    #slider-wrap::before {
+      content: '';
+      position: absolute;
+      left: 50%;
+      top: 0;
+      transform: translateX(-50%);
+      width: 6px;
+      height: 84px;
+      background: rgba(255, 255, 255, 0.03);
+      border-radius: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.04);
+      pointer-events: none;
+      box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.2);
+    }
+
+    #hint {
+      display: none;
+    }
+
+    .measure-label {
+      font: 12px/1 sans-serif;
+      color: #fff;
+      background: rgba(255, 122, 31, 0.9);
+      padding: 4px 10px;
+      border-radius: 6px;
+      border: 1px solid rgba(255,255,255,0.2);
+      white-space: nowrap;
+      pointer-events: none;
+      font-weight: 600;
+      backdrop-filter: blur(4px);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 3px;
+    }
+
+    /* note under the result: "width between axes", "plan · Δh · slope" */
+    /* coordinate point: label above the point, the copy button is clickable */
+    .measure-label.coord-label {
+      flex-direction: row;
+      gap: 6px;
+      padding: 3px 4px 3px 10px;
+      margin-top: -34px;   /* transform is taken by CSS2DRenderer */
+      font-variant-numeric: tabular-nums;
+    }
+    .coord-copy {
+      pointer-events: auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 22px;
+      height: 20px;
+      padding: 0;
+      border: 0;
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.18);
+      color: #fff;
+      cursor: pointer;
+    }
+    .coord-copy:hover { background: rgba(255, 255, 255, 0.34); }
+
+    #utm-zone-chip {
+      position: absolute;
+      top: calc(100% + 6px);
+      right: 0;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 6px 4px 10px;
+      font-size: 12px;
+      color: var(--text, #ddd);
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      white-space: nowrap;
+    }
+    #utm-zone-chip.hidden { display: none; }
+    #utm-zone {
+      font: inherit;
+      color: inherit;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 1px 4px;
+    }
+    #utm-zone option { background: #1e1e1e; color: #ddd; }
+
+    .measure-label .sub {
+      font-size: 10px;
+      font-weight: 500;
+      opacity: 0.9;
+    }
+
+    #measure-context-menu {
+      position: fixed;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+      padding: 4px;
+      z-index: 1000;
+      min-width: 140px;
+      pointer-events: auto;
+      backdrop-filter: blur(12px);
+    }
+
+    #measure-context-menu button {
+      display: block;
+      width: 100%;
+      padding: 8px 14px;
+      border: none;
+      background: transparent;
+      cursor: pointer;
+      font-size: 13px;
+      text-align: left;
+      border-radius: 6px;
+      color: var(--text);
+      font-family: Manrope, system-ui, sans-serif;
+      font-weight: 500;
+      transition: background 0.15s;
+    }
+
+    #measure-context-menu button:hover {
+      background: var(--soft);
+    }
+
+    #measure-context-menu button.danger {
+      color: #e05a2b;
+    }
+
+    #measure-context-menu button.danger:hover {
+      background: rgba(224, 90, 43, 0.12);
+    }
+
+    .measure-dot {
+      pointer-events: auto !important;
+      cursor: pointer;
+    }
+
+    .measure-line {
+      pointer-events: auto !important;
+      cursor: pointer;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    link[rel="icon"] {
+      display: none;
+    }
+
+  </style>
+  <link rel="icon" href="logo.svg" type="image/svg+xml">
+</head>
+<body>
+
+<div id="app-window">
+<div class="resize-handle n"  data-dir="n"></div>
+<div class="resize-handle s"  data-dir="s"></div>
+<div class="resize-handle w"  data-dir="w"></div>
+<div class="resize-handle e"  data-dir="e"></div>
+<div class="resize-handle nw" data-dir="nw"></div>
+<div class="resize-handle ne" data-dir="ne"></div>
+<div class="resize-handle sw" data-dir="sw"></div>
+<div class="resize-handle se" data-dir="se"></div>
+
+<div id="topbar">
+  <div id="logo">
+    <img id="logo-img" src="logo.svg" alt="" draggable="false"
+         onerror="this.onerror=null; this.src='logo-64.png'">
+    <span id="logo-name">3D Viewer</span>
+    <span id="logo-badge">BIM</span>
+  </div>
+
+  <button class="btn-primary" id="btn-open-file">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+    </svg>
+    <span class="btn-label">Open file</span>
+  </button>
+
+  <button class="btn-primary" id="btn-top-view">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <!-- a plane in perspective and an arrow looking down -->
+      <path d="M1.5 21.5 7 14h15.5L17 21.5z" fill="currentColor" fill-opacity="0.3"/>
+      <path d="M12 1.5v8"/>
+      <path d="M9 6.5l3 3 3-3"/>
+    </svg>
+    <span class="btn-label">Top view</span>
+  </button>
+
+  <!-- Measuring: the modes and Clear in one group -->
+  <div class="tool-group" role="group" aria-label="Measuring">
+    <button class="btn-primary" id="btn-measure">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="7" width="20" height="10" rx="1"/>
+        <line x1="6" y1="7" x2="6" y2="12"/>
+        <line x1="10" y1="7" x2="10" y2="12"/>
+        <line x1="14" y1="7" x2="14" y2="12"/>
+        <line x1="18" y1="7" x2="18" y2="12"/>
+      </svg>
+      <span class="btn-label">Measure</span>
+    </button>
+
+    <button class="btn-primary" id="btn-measure-width">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <!-- two marking lines and the width between them -->
+        <path d="M4 3v18" stroke-dasharray="3 3"/>
+        <path d="M20 3v18"/>
+        <path d="M7.5 12h9"/>
+        <path d="M10 9.5 7.5 12l2.5 2.5"/>
+        <path d="M14 9.5l2.5 2.5-2.5 2.5"/>
+      </svg>
+      <span class="btn-label">Lane width</span>
+    </button>
+
+    <button class="btn-primary" id="btn-measure-height">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <!-- vertical dimension line from a point down to the ground -->
+        <path d="M8 2.5h8"/>
+        <path d="M12 3v15"/>
+        <path d="M9.5 5.5 12 3l2.5 2.5"/>
+        <path d="M9.5 15.5 12 18l2.5-2.5"/>
+        <path d="M3 20.5h18"/>
+        <path d="M6 20.5l-1.5 2M10 20.5l-1.5 2M14 20.5l-1.5 2M18 20.5l-1.5 2" stroke-width="1.2"/>
+      </svg>
+      <span class="btn-label">Height</span>
+    </button>
+
+    <button class="btn-primary" id="btn-measure-point">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <!-- map pin -->
+        <path d="M20 10c0 6-8 12-8 12S4 16 4 10a8 8 0 0 1 16 0z"/>
+        <circle cx="12" cy="10" r="3"/>
+      </svg>
+      <span class="btn-label">Coordinates</span>
+    </button>
+
+    <span class="tool-sep"></span>
+
+    <!-- the UTM zone is shown only in Coordinates mode -->
+    <div id="utm-zone-chip" class="hidden" title="Coordinate system of the models">
+      WGS 84 /
+      <select id="utm-zone"></select>
+    </div>
+
+    <button class="btn-primary" id="btn-clear-measurements">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 6h18"/>
+        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+      </svg>
+      <span class="btn-label">Clear</span>
+    </button>
+  </div>
+
+  <span id="file-name"></span>
+
+  <div id="win-controls">
+    <button id="btn-win-minimize" title="Minimize">─</button>
+    <button id="btn-win-maximize" title="Maximize">
+      <!-- normal window: one square, "maximize" -->
+      <svg class="icon-maximize" width="11" height="11" viewBox="0 0 11 11" fill="none">
+        <rect x="1" y="1" width="9" height="9" rx="1.5" stroke="currentColor" stroke-width="1.5" />
+      </svg>
+      <!-- maximized window: two squares, "restore" -->
+      <svg class="icon-restore" width="11" height="11" viewBox="0 0 11 11" fill="none">
+        <path d="M3.25 2.75V2.5A1.5 1.5 0 0 1 4.75 1h3.75A1.5 1.5 0 0 1 10 2.5v3.75a1.5 1.5 0 0 1-1.5 1.5h-.25"
+              stroke="currentColor" stroke-width="1.2" />
+        <rect x="1" y="3.25" width="6.75" height="6.75" rx="1.5" stroke="currentColor" stroke-width="1.2" />
+      </svg>
+    </button>
+    <button id="btn-win-close" title="Close">✕</button>
+  </div>
+</div>
+
+<div id="main-area">
+  <div id="viewer-wrap">
+    <div id="viewer-mount"></div>
+
+    <div id="model-panel" class="hidden">
+      <div class="panel-head">
+        <div class="title" style="margin-bottom:0">Layers</div>
+        <span id="layers-count"></span>
+        <button id="layers-collapse" title="Collapse">
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
+            <path d="M5 2.5 9 7.5H1z"/>
+          </svg>
+        </button>
+      </div>
+      <div id="model-list"></div>
+      <div id="layers-resize" title="Drag to resize">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round">
+          <path d="M12 6 6 12M12 9.5 9.5 12"/>
+        </svg>
+      </div>
+    </div>
+
+    <div id="status">No file loaded. Click "Open file"</div>
+    <div id="hint">LMB: drag · RMB: orbit · wheel: zoom · double click: fly to point</div>
+
+    <div id="theme-switch-wrapper">
+      <div class="theme-toggle" id="perf-toggle-btn" role="switch" aria-checked="false"
+           title="Low-power mode for slower PCs: simpler rendering while moving, full quality once the camera stops">
+        <span class="icon-on">
+          <!-- low-power mode on: a bolt on the left; a click returns to full performance -->
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>
+        </span>
+        <span class="icon-off">
+          <!-- full performance: a feather on the right; a click enables low-power mode -->
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20.2 12.2a6 6 0 0 0-8.5-8.5L5 10.5V19h8.5z"/><path d="M16 8 2 22"/><path d="M17.5 15H9"/>
+          </svg>
+        </span>
+        <div class="knob"></div>
+      </div>
+      <div class="theme-toggle" id="theme-toggle-btn" title="Switch scene background">
+        <span class="icon-sun">☀</span>
+        <span class="icon-moon">☾</span>
+        <div class="knob"></div>
+      </div>
+    </div>
+
+    <div id="hint-btn">?
+      <div id="hint-tooltip">
+        <div class="hint-col">
+          <div class="hint-title">Mouse</div>
+          <ul>
+            <li><b>Left button</b>: drag the scene</li>
+            <li><b>Right button</b>: orbit around the point under the cursor</li>
+            <li><b>Wheel</b>: zoom towards the cursor</li>
+            <li><b>Double click</b>: fly closer to the point</li>
+            <li><b>Double click on a layer</b>: zoom to the whole layer</li>
+          </ul>
+          <div class="hint-title">Panels and switches</div>
+          <ul>
+            <li><b>Layers</b> (left): visibility of models and DXF layers</li>
+            <li><b>Lighting</b> (right): daylight or studio; the slider sets brightness</li>
+            <li><b><svg class="hint-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20.2 12.2a6 6 0 0 0-8.5-8.5L5 10.5V19h8.5z"/><path d="M16 8 2 22"/><path d="M17.5 15H9"/></svg> / <svg class="hint-ico" width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg></b>: low-power mode for slower PCs (simpler rendering while moving, full quality once stopped) or full performance</li>
+            <li><b>☀ / ☾</b>: light or dark scene background</li>
+          </ul>
+        </div>
+        <div class="hint-col">
+          <div class="hint-title">Top bar</div>
+          <ul>
+            <li><b>Open file</b>: IFC, OBJ, LAS/LAZ, DXF</li>
+            <li><b>Top view</b>: the whole plan, north up</li>
+          </ul>
+          <div class="hint-title">Measuring</div>
+          <ul>
+            <li><b>Measure</b>: distance between two points on the model. Below it:
+              <b>L</b>: horizontal distance, <b>H</b>: height difference,
+              <b>i</b>: slope, %</li>
+            <li><b>Lane width</b>: straight across the lane, between the centre lines of the markings;
+              points snap to the marking's centre line</li>
+            <li><b>Height</b>: plumb line from a point on an object down to the surface below</li>
+            <li><b>Coordinates</b>: latitude and longitude of a point (WGS 84); the button next to it
+              copies them; the UTM zone of the models is set in the chip below the buttons</li>
+            <li><b>Clear</b>: remove all measurements</li>
+            <li><b>Right click</b> on a measurement: delete just that one</li>
+            <li><b>Esc</b>: cancel the measurement in progress</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <!-- Lighting panel -->
+    <div id="light-controls">
+      <div class="title">Lighting</div>
+      <div id="light-content">
+        <div id="light-buttons">
+          <button id="mode-day" class="active" title="Daylight">☀️</button>
+          <button id="mode-studio" title="Studio lighting">💡</button>
+        </div>
+
+        <div id="slider-wrap">
+          <input type="range" id="brightness-slider" min="0" max="200" value="50" orient="vertical">
+          <!-- brightness-label is hidden, but the bundle expects it to exist -->
+          <span id="brightness-label" style="display:none">50%</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- qwebchannel.js is served by our Python server (viewer.py serves it from web/) -->
+<script src="./qwebchannel.js"></script>
+<script src="./web-ifc-api-iife.es5.js"></script>
+<script src="./main.bundle.js"></script>
+
+<script>
+  document.addEventListener('DOMContentLoaded', function () {
+
+    // ===== Top-bar button labels =====
+    // A label does not hide as soon as the mouse leaves its button: while the mouse
+    // moves across the buttons, open labels stay, so the buttons under the cursor
+    // do not shift. All labels close 0.8 s after the mouse has left
+    // the buttons altogether.
+    (function () {
+      const buttons = Array.from(document.querySelectorAll('.btn-primary')).filter(
+        (b) => b.querySelector('.btn-label'));
+      let timer = null;
+      buttons.forEach((b) => {
+        b.addEventListener('mouseenter', () => {
+          clearTimeout(timer);
+          b.classList.add('open');
+        });
+        b.addEventListener('mouseleave', () => {
+          clearTimeout(timer);
+          timer = setTimeout(() => buttons.forEach((x) => x.classList.remove('open')), 800);
+        });
+      });
+    })();
+
+    // ===== Theme =====
+    const toggleBtn = document.getElementById('theme-toggle-btn');
+    const appWindow = document.getElementById('app-window');
+
+    const savedTheme = localStorage.getItem('viewer-theme');
+    let isLight = savedTheme === 'light';
+
+    function applyTheme(light) {
+      appWindow.classList.toggle('light-scene', light);
+      toggleBtn.classList.toggle('light', light);
+      localStorage.setItem('viewer-theme', light ? 'light' : 'dark');
+      // the second argument recolours the background gradient itself:
+      // scene.background and clearColor are hidden behind the gradient sphere
+      if (window.viewerApp && window.viewerApp.setBackground) {
+        window.viewerApp.setBackground(light ? 0xFFE4C4 : 0x04050a, light);
+      }
+    }
+
+    // ===== Tooltip of the maximize/restore button =====
+    const maxBtn = document.getElementById('btn-win-maximize');
+    new MutationObserver(function () {
+      maxBtn.title = appWindow.classList.contains('maximized') ? 'Restore' : 'Maximize';
+    }).observe(appWindow, { attributes: true, attributeFilter: ['class'] });
+
+    toggleBtn.addEventListener('click', function () {
+      isLight = !isLight;
+      applyTheme(isLight);
+      if (window.pyBackend) window.pyBackend.onThemeChanged(isLight);
+    });
+
+    applyTheme(isLight);
+
+    // ===== CSS fill of the brightness slider =====
+    const slider = document.getElementById('brightness-slider');
+    function updateFill() {
+      const val = parseInt(slider.value, 10);
+      const pct = ((val - +slider.min) / (+slider.max - +slider.min)) * 100;
+      slider.style.setProperty('--fill', pct + '%');
+    }
+    slider.addEventListener('input', updateFill);
+    updateFill();
+
+    // ===== Low-power mode for slower PCs =====
+    const perfToggle = document.getElementById('perf-toggle-btn');
+    function applyLowPower(on) {
+      perfToggle.classList.toggle('on', on);
+      perfToggle.setAttribute('aria-checked', on ? 'true' : 'false');
+      try { localStorage.setItem('viewer-lowpower', on ? '1' : '0'); } catch (e) {}
+      if (window.viewerApp && window.viewerApp.setLowPower) window.viewerApp.setLowPower(on);
+    }
+    perfToggle.addEventListener('click', function () {
+      applyLowPower(!perfToggle.classList.contains('on'));
+    });
+    let savedLow = false;
+    try { savedLow = localStorage.getItem('viewer-lowpower') === '1'; } catch (e) {}
+    applyLowPower(savedLow);
+
+    // ===== Top view =====
+    document.getElementById('btn-top-view').addEventListener('click', function () {
+      if (window.viewerApp && window.viewerApp.topView) window.viewerApp.topView();
+    });
+
+    // ===== Layers panel: collapse/expand and resize =====
+    // Size and state are remembered between sessions.
+    const layersPanel = document.getElementById('model-panel');
+    const collapseBtn = document.getElementById('layers-collapse');
+    const resizeGrip = document.getElementById('layers-resize');
+
+    function store(key, value) {
+      try { localStorage.setItem(key, value); } catch (e) {}
+    }
+    function load(key) {
+      try { return localStorage.getItem(key); } catch (e) { return null; }
+    }
+
+    function setCollapsed(value) {
+      layersPanel.classList.toggle('collapsed', value);
+      collapseBtn.title = value ? 'Expand' : 'Collapse';
+      store('layers-collapsed', value ? '1' : '0');
+    }
+    collapseBtn.addEventListener('click', function () {
+      setCollapsed(!layersPanel.classList.contains('collapsed'));
+    });
+    // double click on the title also collapses/expands
+    layersPanel.querySelector('.panel-head').addEventListener('dblclick', function (e) {
+      if (e.target.closest('button')) return;
+      setCollapsed(!layersPanel.classList.contains('collapsed'));
+    });
+    setCollapsed(load('layers-collapsed') === '1');
+
+    const MIN_W = 190, MIN_H = 110;
+    // the panel must not extend beyond the scene area
+    function maxSize() {
+      const area = layersPanel.parentElement.getBoundingClientRect();
+      return { w: area.width - 28, h: area.height - 70 };
+    }
+    function applySize(w, h) {
+      const max = maxSize();
+      w = Math.max(MIN_W, Math.min(w, max.w));
+      h = Math.max(MIN_H, Math.min(h, max.h));
+      layersPanel.style.width = w + 'px';
+      layersPanel.style.height = h + 'px';
+      layersPanel.classList.add('sized');
+      return { w, h };
+    }
+
+    const saved = (load('layers-size') || '').split('x').map(Number);
+    if (saved.length === 2 && saved.every((n) => Number.isFinite(n) && n > 0)) {
+      applySize(saved[0], saved[1]);
+    }
+
+    let drag = null;
+    resizeGrip.addEventListener('pointerdown', function (e) {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const r = layersPanel.getBoundingClientRect();
+      drag = { x: e.clientX, y: e.clientY, w: r.width, h: r.height };
+      resizeGrip.setPointerCapture(e.pointerId);
+      resizeGrip.classList.add('dragging');
+      document.body.style.cursor = 'nwse-resize';
+    });
+    resizeGrip.addEventListener('pointermove', function (e) {
+      if (!drag) return;
+      drag.last = applySize(drag.w + e.clientX - drag.x, drag.h + e.clientY - drag.y);
+    });
+    function endDrag() {
+      if (!drag) return;
+      if (drag.last) store('layers-size', Math.round(drag.last.w) + 'x' + Math.round(drag.last.h));
+      drag = null;
+      resizeGrip.classList.remove('dragging');
+      document.body.style.cursor = '';
+    }
+    resizeGrip.addEventListener('pointerup', endDrag);
+    resizeGrip.addEventListener('pointercancel', endDrag);
+
+    // double click on the corner restores the default size
+    resizeGrip.addEventListener('dblclick', function () {
+      layersPanel.style.width = '';
+      layersPanel.style.height = '';
+      layersPanel.classList.remove('sized');
+      try { localStorage.removeItem('layers-size'); } catch (e) {}
+    });
+
+    // when the window shrinks, the panel shrinks with it
+    window.addEventListener('resize', function () {
+      if (!layersPanel.classList.contains('sized')) return;
+      const r = layersPanel.getBoundingClientRect();
+      applySize(r.width, r.height);
+    });
+
+    // Everything else (top-bar buttons, drag, QWebChannel, lighting,
+    // measuring) is handled in main.bundle.js.
+
+  });
+</script>
+
+<div id="overlay">
+  <div class="overlay-inner">
+    <div class="overlay-mark">
+      <img class="overlay-logo" src="logo.svg" alt="" draggable="false"
+           onerror="this.onerror=null; this.src='logo-128.png'">
+      <div class="overlay-spinner"></div>
+    </div>
+    <div id="overlay-title">Starting the viewer</div>
+    <div id="overlay-sub"></div>
+    <button id="overlay-cancel" class="hidden">Cancel</button>
+  </div>
+</div>
+
+<div class="resize-grip grip-t"  data-edge="top"></div>
+<div class="resize-grip grip-b"  data-edge="bottom"></div>
+<div class="resize-grip grip-l"  data-edge="left"></div>
+<div class="resize-grip grip-r"  data-edge="right"></div>
+<div class="resize-grip grip-tl" data-edge="top-left"></div>
+<div class="resize-grip grip-tr" data-edge="top-right"></div>
+<div class="resize-grip grip-bl" data-edge="bottom-left"></div>
+<div class="resize-grip grip-br" data-edge="bottom-right"></div>
+
+<div id="error-toast"></div>
+
+</div><!-- #app-window -->
+</body>
+</html>

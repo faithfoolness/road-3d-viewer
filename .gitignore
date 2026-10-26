@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.3dvcache
+viewer.log
+build/
+dist/
+*.spec
+.venv/
+venv/
+.idea/
+.vscode/
